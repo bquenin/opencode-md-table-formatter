@@ -21,14 +21,20 @@ const BOX = {
 const widthCache = new Map<string, number>()
 let cacheOperationCount = 0
 
-export const FormatTables: Plugin = async () => {
+interface TableFormatterOptions {
+  style?: "markdown" | "box"
+}
+
+export const FormatTables: Plugin = async (options?: TableFormatterOptions) => {
+  const style = options?.style ?? "markdown"
+  
   return {
     "experimental.text.complete": async (
       input: { sessionID: string; messageID: string; partID: string },
       output: { text: string },
     ) => {
       try {
-        output.text = formatMarkdownTables(output.text)
+        output.text = formatMarkdownTables(output.text, style)
       } catch (error) {
         // If formatting fails, keep original md text
         output.text = output.text + "\n\n<!-- table formatting failed: " + (error as Error).message + " -->"
@@ -37,7 +43,7 @@ export const FormatTables: Plugin = async () => {
   } as Hooks
 }
 
-function formatMarkdownTables(text: string): string {
+function formatMarkdownTables(text: string, style: "markdown" | "box"): string {
   const lines = text.split("\n")
   const result: string[] = []
   let i = 0
@@ -55,7 +61,7 @@ function formatMarkdownTables(text: string): string {
       }
 
       if (isValidTable(tableLines)) {
-        result.push(...formatTable(tableLines))
+        result.push(...formatTable(tableLines, style))
       } else {
         result.push(...tableLines)
         result.push("<!-- table not formatted: invalid structure -->")
@@ -112,7 +118,7 @@ function buildHorizontalLine(
   return left + segments.join(mid) + right
 }
 
-function formatTable(lines: string[]): string[] {
+function formatTable(lines: string[], style: "markdown" | "box"): string[] {
   const separatorIndices = new Set<number>()
   for (let i = 0; i < lines.length; i++) {
     if (isSeparatorRow(lines[i])) separatorIndices.add(i)
@@ -147,33 +153,50 @@ function formatTable(lines: string[]): string[] {
     }
   }
 
-  // Build the box-drawing table
-  const result: string[] = []
+  if (style === "box") {
+    // Build the box-drawing table
+    const result: string[] = []
 
-  // Top border
-  result.push(buildHorizontalLine(colWidths, BOX.topLeft, BOX.topTee, BOX.topRight))
+    // Top border
+    result.push(buildHorizontalLine(colWidths, BOX.topLeft, BOX.topTee, BOX.topRight))
 
-  // Data rows (skip separator rows, replace them with box-drawing middle borders)
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-    if (separatorIndices.has(rowIndex)) {
-      // Replace markdown separator with box-drawing middle border
-      result.push(buildHorizontalLine(colWidths, BOX.leftTee, BOX.cross, BOX.rightTee))
-    } else {
-      // Data row with box-drawing vertical borders
+    // Data rows (skip separator rows, replace them with box-drawing middle borders)
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      if (separatorIndices.has(rowIndex)) {
+        // Replace markdown separator with box-drawing middle border
+        result.push(buildHorizontalLine(colWidths, BOX.leftTee, BOX.cross, BOX.rightTee))
+      } else {
+        // Data row with box-drawing vertical borders
+        const cells: string[] = []
+        for (let col = 0; col < colCount; col++) {
+          const cell = rows[rowIndex][col] ?? ""
+          const align = colAlignments[col]
+          cells.push(padCell(cell, colWidths[col], align))
+        }
+        result.push(BOX.vertical + " " + cells.join(" " + BOX.vertical + " ") + " " + BOX.vertical)
+      }
+    }
+
+    // Bottom border
+    result.push(buildHorizontalLine(colWidths, BOX.bottomLeft, BOX.bottomTee, BOX.bottomRight))
+
+    return result
+  } else {
+    return rows.map((row, rowIndex) => {
       const cells: string[] = []
       for (let col = 0; col < colCount; col++) {
-        const cell = rows[rowIndex][col] ?? ""
+        const cell = row[col] ?? ""
         const align = colAlignments[col]
-        cells.push(padCell(cell, colWidths[col], align))
+
+        if (separatorIndices.has(rowIndex)) {
+          cells.push(formatSeparatorCell(colWidths[col], align))
+        } else {
+          cells.push(padCell(cell, colWidths[col], align))
+        }
       }
-      result.push(BOX.vertical + " " + cells.join(" " + BOX.vertical + " ") + " " + BOX.vertical)
-    }
+      return "| " + cells.join(" | ") + " |"
+    })
   }
-
-  // Bottom border
-  result.push(buildHorizontalLine(colWidths, BOX.bottomLeft, BOX.bottomTee, BOX.bottomRight))
-
-  return result
 }
 
 function getAlignment(delimiterCell: string): "left" | "center" | "right" {
@@ -207,7 +230,7 @@ function getStringWidth(text: string): number {
   const codeBlocks: string[] = []
   let textWithPlaceholders = text.replace(/`(.+?)`/g, (match, content) => {
     codeBlocks.push(content)
-    return `\x00CODE${codeBlocks.length - 1}\x00`
+    return `\u0000CODE${codeBlocks.length - 1}\u0000`
   })
 
   // Step 2: Strip markdown from non-code parts
@@ -226,7 +249,8 @@ function getStringWidth(text: string): number {
   }
 
   // Step 3: Restore code content (with its original markdown preserved)
-  visualText = visualText.replace(/\x00CODE(\d+)\x00/g, (match, index) => {
+  const restoreRegex = new RegExp("\\u0000CODE(\\d+)\\u0000", "g")
+  visualText = visualText.replace(restoreRegex, (match, index) => {
     return codeBlocks[parseInt(index)]
   })
 
@@ -246,6 +270,12 @@ function padCell(text: string, width: number, align: "left" | "center" | "right"
   } else {
     return text + " ".repeat(totalPadding)
   }
+}
+
+function formatSeparatorCell(width: number, align: "left" | "center" | "right"): string {
+  if (align === "center") return ":" + "-".repeat(Math.max(1, width - 2)) + ":"
+  if (align === "right") return "-".repeat(Math.max(1, width - 1)) + ":"
+  return "-".repeat(width)
 }
 
 function incrementOperationCount() {
